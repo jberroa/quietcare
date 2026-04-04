@@ -1,0 +1,5 @@
+{
+  "name": "QuietCare: Hospital Noise Monitor",
+  "description": "A comprehensive healthcare dashboard for tracking noise levels in hospital units, integrating decibel meter data and Press Ganey patient feedback with AI-driven insights.",
+  "requestFramePermissions": []
+}
