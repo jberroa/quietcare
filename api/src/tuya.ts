@@ -37,7 +37,8 @@ export function extractDecibelFromStatus(
   if (typeof v === 'number' && Number.isFinite(v)) n = v;
   else if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) n = Number(v);
   else return null;
-  return Math.round(n * scale * 100) / 100;
+  const scaled = n * scale;
+  return Math.round(scaled / 10);
 }
 
 let context: TuyaContext | null = null;
