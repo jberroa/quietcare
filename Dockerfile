@@ -3,8 +3,10 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-# Vite bakes GEMINI_API_KEY at build time (see vite.config.ts). Set in Coolify as a
-# build-time variable / Docker build arg if the client bundle needs it.
+# Vite bakes these at build time. In Coolify: set as Build-time variables / Docker build args.
+# VITE_API_BASE_URL = public API origin when the SPA is on a different host (no trailing slash).
+ARG VITE_API_BASE_URL
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 ARG GEMINI_API_KEY
 ENV GEMINI_API_KEY=${GEMINI_API_KEY}
 
