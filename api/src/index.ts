@@ -59,6 +59,13 @@ const app = express();
 const DEFAULT_LIMIT = 100;
 const pollIntervalMs = Number(process.env.TUYA_POLL_INTERVAL_MS) || 30_000;
 
+// TLS often terminates at Coolify/nginx; Node sees HTTP. Trust X-Forwarded-Proto so
+// req.secure is true and express-session can send Secure + SameSite=None cookies.
+if (process.env.NODE_ENV === 'production') {
+  const hops = Number(process.env.TRUST_PROXY_HOPS);
+  app.set('trust proxy', Number.isFinite(hops) && hops > 0 ? hops : 1);
+}
+
 function parseCorsOrigins(): string[] | boolean {
   const raw = process.env.CORS_ORIGIN;
   if (!raw || raw === '*') return true;
