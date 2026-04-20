@@ -798,11 +798,7 @@ export default function App() {
             </button>
           </form>
 
-          <div className="mt-10 pt-8 border-t border-slate-50 text-center space-y-4">
-            <div className="bg-blue-50/50 rounded-2xl p-4 border border-blue-100/50">
-              <p className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mb-1">Development Hint</p>
-              <p className="text-[11px] text-blue-600 font-medium">Admin: 0000 • Staff: 1111</p>
-            </div>
+          <div className="mt-10 pt-8 border-t border-slate-50 text-center">
             <p className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">
               Authorized Personnel Only • Medamaitrak.com
             </p>
