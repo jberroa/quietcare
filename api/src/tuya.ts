@@ -59,16 +59,39 @@ export function getTuyaContext(): TuyaContext | null {
   return context;
 }
 
-/** Unix seconds from `result.<field>` (see TUYA_DEDUP_TIME_FIELD). Used to avoid duplicate rows per device snapshot. */
+/**
+ * Stored in `noise_readings.tuya_dedup_time` to skip identical API responses.
+ *
+ * `TUYA_DEDUP_TIME_FIELD` (default `t`):
+ * - `t` — root envelope timestamp in ms (unique per Tuya response; use when `result.update_time`
+ *   stays stale while `status` values change)
+ * - `update_time` / `active_time` / other — read numeric `result.<field>` (unix seconds)
+ * - `none` — no dedup (insert every successful poll)
+ */
 export function extractTuyaDedupTime(payload: unknown): number | null {
-  const field = (process.env.TUYA_DEDUP_TIME_FIELD || 'update_time').trim();
-  if (!field || !payload || typeof payload !== 'object') return null;
+  const field = (process.env.TUYA_DEDUP_TIME_FIELD || 't').trim().toLowerCase();
+  if (!field || field === 'none' || field === 'off') return null;
+  if (!payload || typeof payload !== 'object') return null;
   const o = payload as Record<string, unknown>;
   const result = o.result;
-  if (!result || typeof result !== 'object') return null;
-  const r = result as Record<string, unknown>;
-  const v = r[field];
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
+
+  const rootT = o.t;
+  const rootTnum =
+    typeof rootT === 'number' && Number.isFinite(rootT) ? Math.trunc(rootT) : null;
+
+  if (field === 't') {
+    if (rootTnum != null) return rootTnum;
+  } else if (result && typeof result === 'object') {
+    const r = result as Record<string, unknown>;
+    const v = r[field];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+
+  if (rootTnum != null) return rootTnum;
+  if (result && typeof result === 'object') {
+    const u = (result as Record<string, unknown>).update_time;
+    if (typeof u === 'number' && Number.isFinite(u)) return u;
+  }
   return null;
 }
 
