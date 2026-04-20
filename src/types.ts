@@ -8,6 +8,8 @@ export interface HospitalUnit {
   targetDecibel: number;
   deviceName: string;
   deviceId: string;
+  /** Demo: simulated readings in the browser. Live: server polls Tuya and stores readings. */
+  readingSource?: 'demo' | 'live';
   createdAt: number;
 }
 

@@ -19,6 +19,7 @@ export const UnitModal: React.FC<UnitModalProps> = ({ isOpen, onClose, onSave, i
     targetDecibel: initialData?.targetDecibel || 45,
     deviceName: initialData?.deviceName || '',
     deviceId: initialData?.deviceId || '',
+    readingSource: (initialData?.readingSource === 'live' ? 'live' : 'demo') as 'demo' | 'live',
   });
 
   React.useEffect(() => {
@@ -32,6 +33,7 @@ export const UnitModal: React.FC<UnitModalProps> = ({ isOpen, onClose, onSave, i
         targetDecibel: initialData.targetDecibel,
         deviceName: initialData.deviceName,
         deviceId: initialData.deviceId,
+        readingSource: initialData.readingSource === 'live' ? 'live' : 'demo',
       });
     } else {
       setFormData({ 
@@ -43,6 +45,7 @@ export const UnitModal: React.FC<UnitModalProps> = ({ isOpen, onClose, onSave, i
         targetDecibel: 45,
         deviceName: '',
         deviceId: '',
+        readingSource: 'demo',
       });
     }
   }, [initialData]);
@@ -139,9 +142,30 @@ export const UnitModal: React.FC<UnitModalProps> = ({ isOpen, onClose, onSave, i
 
             <div className="p-4 bg-blue-50 rounded-2xl border border-blue-100 space-y-4">
               <p className="text-[10px] font-black text-blue-600 uppercase tracking-widest">Sensor Configuration</p>
+              <div>
+                <label className="block text-[10px] font-bold uppercase tracking-widest text-blue-400 mb-1.5">Data mode</label>
+                <select
+                  value={formData.readingSource}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      readingSource: e.target.value === 'live' ? 'live' : 'demo',
+                    })
+                  }
+                  className="w-full px-4 py-3 bg-white border border-blue-100 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all text-sm font-bold"
+                >
+                  <option value="demo">Demo (simulated in browser)</option>
+                  <option value="live">Live (server polls Tuya; needs real device id)</option>
+                </select>
+              </div>
+              <p className="text-[11px] text-blue-700/90 leading-relaxed">
+                For live mode, use the Tuya IoT cloud device id (same id used in{' '}
+                <code className="text-[10px] bg-blue-100/80 px-1 rounded">/v1.0/devices/&#123;device_id&#125;</code>
+                ). Friendly label below is for display only.
+              </p>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-widest text-blue-400 mb-1.5">Device Name</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-blue-400 mb-1.5">Device label</label>
                   <input
                     required
                     type="text"
@@ -152,12 +176,12 @@ export const UnitModal: React.FC<UnitModalProps> = ({ isOpen, onClose, onSave, i
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-widest text-blue-400 mb-1.5">Device ID</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-blue-400 mb-1.5">Tuya device ID</label>
                   <input
                     required
                     type="text"
-                    placeholder="QC-8829"
-                    className="w-full px-4 py-3 bg-white border border-blue-100 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all text-sm"
+                    placeholder="eb79… (from Tuya IoT)"
+                    className="w-full px-4 py-3 bg-white border border-blue-100 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all text-sm font-mono"
                     value={formData.deviceId}
                     onChange={(e) => setFormData({ ...formData, deviceId: e.target.value })}
                   />

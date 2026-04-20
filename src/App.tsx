@@ -35,6 +35,10 @@ import {
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { HospitalUnit, NoiseReading, PatientFeedback, StaffMember, Meeting, Alert } from './types';
+
+function unitReadingSource(u: HospitalUnit): 'demo' | 'live' {
+  return u.readingSource === 'live' ? 'live' : 'demo';
+}
 import { NoiseChart } from './components/NoiseChart';
 import { AIInsightsPanel } from './components/AIInsightsPanel';
 import { UnitModal } from './components/UnitModal';
@@ -45,141 +49,136 @@ import { ProductShowcase } from './components/ProductShowcase';
 import { UnitQRCodeModal } from './components/UnitQRCodeModal';
 import { NotificationDrawer } from './components/NotificationDrawer';
 import { cn } from './lib/utils';
-
-// Initial Mock Data
-const INITIAL_UNITS: HospitalUnit[] = [
-  { 
-    id: '1', 
-    name: 'ICU East', 
-    type: 'Critical Care',
-    location: 'Main Building',
-    floor: '4', 
-    department: 'Critical Care', 
-    targetDecibel: 40, 
-    deviceName: 'SN-ICU-01',
-    deviceId: 'QC-1001',
-    createdAt: Date.now() 
-  },
-  { 
-    id: '2', 
-    name: 'Maternity A', 
-    type: 'Inpatient',
-    location: 'Women\'s Center',
-    floor: '2', 
-    department: 'Obstetrics', 
-    targetDecibel: 35, 
-    deviceName: 'SN-MAT-05',
-    deviceId: 'QC-2005',
-    createdAt: Date.now() 
-  },
-];
-
-const INITIAL_STAFF: StaffMember[] = [
-  { 
-    id: 'admin', name: 'System Admin', role: 'Administrator', unitId: '1', status: 'active', pincode: '0000', isAdmin: true, email: 'admin@quietcare.com',
-    notificationPreferences: { thresholdAlerts: true, peakAlerts: true, criticalFeedback: true, systemAlerts: true }
-  },
-  { 
-    id: 's1', name: 'Dr. Sarah Chen', role: 'Chief of Medicine', unitId: '1', status: 'active', pincode: '1234', email: 'sarah.chen@hospital.com',
-    notificationPreferences: { thresholdAlerts: true, peakAlerts: true, criticalFeedback: true, systemAlerts: false }
-  },
-  { 
-    id: 's2', name: 'Nurse Mark', role: 'Nurse', unitId: '1', status: 'active', pincode: '1111', email: 'mark.nurse@hospital.com',
-    notificationPreferences: { thresholdAlerts: true, peakAlerts: false, criticalFeedback: true, systemAlerts: false }
-  },
-  { 
-    id: 's3', name: 'Officer Jane', role: 'Quiet Compliance Officer', unitId: '2', status: 'active', pincode: '2222', email: 'jane.quiet@hospital.com',
-    notificationPreferences: { thresholdAlerts: true, peakAlerts: true, criticalFeedback: true, systemAlerts: true }
-  },
-  { 
-    id: 's4', name: 'Miguel Rodriguez', role: 'Housekeeping', unitId: '1', status: 'active', pincode: '3333', email: 'miguel.r@hospital.com',
-    notificationPreferences: { thresholdAlerts: false, peakAlerts: false, criticalFeedback: false, systemAlerts: false }
-  },
-  { 
-    id: 's5', name: 'Sam Wilson', role: 'Maintenance', unitId: '2', status: 'active', pincode: '4444', email: 'sam.w@hospital.com',
-    notificationPreferences: { thresholdAlerts: false, peakAlerts: false, criticalFeedback: false, systemAlerts: true }
-  },
-];
+import { apiFetch, apiFetchPublic } from './lib/api';
 
 import { jsPDF } from 'jspdf';
 import { AnalyticsChart } from './components/AnalyticsChart';
 import { LogOut, Lock, ShieldCheck } from 'lucide-react';
 
 export default function App() {
-  const [currentUser, setCurrentUser] = useState<StaffMember | null>(() => {
-    const saved = localStorage.getItem('quietcare_current_user');
-    return saved ? JSON.parse(saved) : null;
-  });
+  const [currentUser, setCurrentUser] = useState<StaffMember | null>(null);
   const [loginPin, setLoginPin] = useState('');
   const [loginError, setLoginError] = useState('');
+  const [authChecked, setAuthChecked] = useState(false);
 
   const [activeTab, setActiveTab] = useState<'Dashboard' | 'Units' | 'Staff' | 'Committee' | 'Analytics' | 'Product' | 'Settings' | 'Education' | 'Feedback'>('Dashboard');
-  const [units, setUnits] = useState<HospitalUnit[]>(() => {
-    const saved = localStorage.getItem('quietcare_units');
-    return saved ? JSON.parse(saved) : INITIAL_UNITS;
-  });
-  const [staff, setStaff] = useState<StaffMember[]>(() => {
-    const saved = localStorage.getItem('quietcare_staff');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      // Migration: If staff data is empty or lacks pincodes, reset to initial staff
-      if (parsed.length === 0 || !parsed.some((s: any) => s.pincode)) {
-        return INITIAL_STAFF;
-      }
-      return parsed;
+  const [units, setUnits] = useState<HospitalUnit[]>([]);
+  const [staff, setStaff] = useState<StaffMember[]>([]);
+
+  const loadSession = useCallback(async () => {
+    try {
+      const r = await apiFetch('/api/auth/me');
+      const data = (await r.json()) as { user: StaffMember | null };
+      setCurrentUser(data.user);
+    } catch {
+      setCurrentUser(null);
+    } finally {
+      setAuthChecked(true);
     }
-    return INITIAL_STAFF;
-  });
+  }, []);
 
   useEffect(() => {
-    localStorage.setItem('quietcare_current_user', JSON.stringify(currentUser));
-  }, [currentUser]);
+    loadSession();
+  }, [loadSession]);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const refreshAppData = useCallback(async () => {
+    try {
+      const [ur, sr, mr, ar, se] = await Promise.all([
+        apiFetch('/api/units'),
+        apiFetch('/api/staff'),
+        apiFetch('/api/meetings'),
+        apiFetch('/api/alerts'),
+        apiFetch('/api/settings'),
+      ]);
+      if (ur.ok) setUnits((await ur.json()) as HospitalUnit[]);
+      if (sr.ok) setStaff((await sr.json()) as StaffMember[]);
+      if (mr.ok) setMeetings((await mr.json()) as Meeting[]);
+      if (ar.ok) setAlerts((await ar.json()) as Alert[]);
+      if (se.ok) {
+        const raw = (await se.json()) as Record<string, unknown>;
+        const { dataSource: _legacyDataSource, ...rest } = raw;
+        setSettings((prev) => ({
+          ...prev,
+          ...rest,
+        }));
+      }
+    } catch (e) {
+      console.error('[quietcare] refreshAppData', e);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setUnits([]);
+      setStaff([]);
+      setMeetings([]);
+      setAlerts([]);
+      setFeedback({});
+      return;
+    }
+    refreshAppData();
+  }, [currentUser, refreshAppData]);
+
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    const user = staff.find(s => s.pincode === loginPin);
-    if (user) {
-      setCurrentUser(user);
+    try {
+      const r = await apiFetch('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ pincode: loginPin }),
+      });
+      const data = (await r.json()) as { user?: StaffMember; error?: string };
+      if (!r.ok) {
+        setLoginError('Invalid Pincode. Please try again.');
+        setLoginPin('');
+        return;
+      }
+      setCurrentUser(data.user!);
       setLoginPin('');
       setLoginError('');
-    } else {
+    } catch {
       setLoginError('Invalid Pincode. Please try again.');
       setLoginPin('');
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      /* ignore */
+    }
     setCurrentUser(null);
     setActiveTab('Dashboard');
   };
 
-  const markAlertAsRead = (id: string) => {
-    setAlerts(prev => prev.map(a => a.id === id ? { ...a, isRead: true } : a));
+  const markAlertAsRead = async (id: string) => {
+    setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, isRead: true } : a)));
+    try {
+      await apiFetch(`/api/alerts/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ isRead: true }),
+      });
+    } catch (e) {
+      console.error(e);
+    }
   };
 
-  const clearAllAlerts = () => {
+  const clearAllAlerts = async () => {
     setAlerts([]);
+    try {
+      await apiFetch('/api/alerts', { method: 'DELETE' });
+    } catch (e) {
+      console.error(e);
+    }
   };
 
-  const [meetings, setMeetings] = useState<Meeting[]>(() => {
-    const saved = localStorage.getItem('quietcare_meetings');
-    return saved ? JSON.parse(saved) : [];
-  });
-
-  useEffect(() => {
-    localStorage.setItem('quietcare_units', JSON.stringify(units));
-  }, [units]);
-
-  useEffect(() => {
-    localStorage.setItem('quietcare_staff', JSON.stringify(staff));
-  }, [staff]);
-
-  useEffect(() => {
-    localStorage.setItem('quietcare_meetings', JSON.stringify(meetings));
-  }, [meetings]);
-  const [selectedUnitId, setSelectedUnitId] = useState<string>(INITIAL_UNITS[0].id);
+  const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [selectedUnitId, setSelectedUnitId] = useState<string>('');
   const [readings, setReadings] = useState<Record<string, NoiseReading[]>>({});
   const [feedback, setFeedback] = useState<Record<string, PatientFeedback[]>>({});
+  const [publicFeedbackUnit, setPublicFeedbackUnit] = useState<{ id: string; name: string } | null>(
+    null,
+  );
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingUnit, setEditingUnit] = useState<HospitalUnit | null>(null);
   const [isStaffModalOpen, setIsStaffModalOpen] = useState(false);
@@ -187,15 +186,8 @@ export default function App() {
   const [isMeetingModalOpen, setIsMeetingModalOpen] = useState(false);
   const [isQRCodeModalOpen, setIsQRCodeModalOpen] = useState(false);
   const [selectedUnitForQR, setSelectedUnitForQR] = useState<HospitalUnit | null>(null);
-  const [alerts, setAlerts] = useState<Alert[]>(() => {
-    const saved = localStorage.getItem('quietcare_alerts');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [alerts, setAlerts] = useState<Alert[]>([]);
   const [isAlertsOpen, setIsAlertsOpen] = useState(false);
-
-  useEffect(() => {
-    localStorage.setItem('quietcare_alerts', JSON.stringify(alerts));
-  }, [alerts]);
 
   // URL-based routing for feedback
   useEffect(() => {
@@ -210,39 +202,91 @@ export default function App() {
   }, []);
   const [editingMeeting, setEditingMeeting] = useState<Meeting | null>(null);
 
-  // Settings State
-  const [settings, setSettings] = useState(() => {
-    const saved = localStorage.getItem('quietcare_settings');
-    return saved ? JSON.parse(saved) : {
-      notifications: true,
-      aiFrequency: 'Every 15 Minutes',
-      retention: '90 Days'
-    };
+  // Settings State (loaded from API when logged in)
+  const [settings, setSettings] = useState({
+    notifications: true,
+    aiFrequency: 'Every 15 Minutes',
+    retention: '90 Days',
   });
 
   useEffect(() => {
-    localStorage.setItem('quietcare_settings', JSON.stringify(settings));
-  }, [settings]);
+    if (!units.length) return;
+    if (!units.some((u) => u.id === selectedUnitId)) {
+      setSelectedUnitId(units[0].id);
+    }
+  }, [units, selectedUnitId]);
+
+  useEffect(() => {
+    if (!currentUser || !selectedUnitId) return;
+    (async () => {
+      try {
+        const r = await apiFetch(`/api/feedback?unitId=${encodeURIComponent(selectedUnitId)}`);
+        if (!r.ok) return;
+        const rows = (await r.json()) as PatientFeedback[];
+        setFeedback((prev) => ({ ...prev, [selectedUnitId]: rows }));
+      } catch (e) {
+        console.error('[quietcare] feedback', e);
+      }
+    })();
+  }, [currentUser, selectedUnitId]);
+
+  useEffect(() => {
+    if (activeTab !== 'Feedback' || !selectedUnitId || currentUser) {
+      setPublicFeedbackUnit(null);
+      return;
+    }
+    (async () => {
+      try {
+        const r = await apiFetchPublic(`/api/public/units/${encodeURIComponent(selectedUnitId)}`);
+        if (r.ok) {
+          setPublicFeedbackUnit((await r.json()) as { id: string; name: string });
+        } else {
+          setPublicFeedbackUnit(null);
+        }
+      } catch {
+        setPublicFeedbackUnit(null);
+      }
+    })();
+  }, [activeTab, selectedUnitId, currentUser]);
+
+  const persistSettings = useCallback(async (next: typeof settings) => {
+    try {
+      const r = await apiFetch('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify(next),
+      });
+      if (r.ok) {
+        const raw = (await r.json()) as Record<string, unknown>;
+        const { dataSource: _legacyDataSource, ...rest } = raw;
+        setSettings((prev) => ({
+          ...prev,
+          ...rest,
+        }));
+      }
+    } catch (e) {
+      console.error('[quietcare] settings', e);
+    }
+  }, []);
 
   // Analytics State
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [reportStatus, setReportStatus] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
-  const selectedUnit = units.find(u => u.id === selectedUnitId) || units[0];
-
-  // Simulate real-time noise data
+  // Demo: simulated decibel stream (local only) for units marked Demo
   useEffect(() => {
+    if (!currentUser) return;
+
     const interval = setInterval(() => {
       setReadings(prev => {
         const newReadings = { ...prev };
         const newAlerts: Alert[] = [];
 
         units.forEach(unit => {
+          if (unitReadingSource(unit) === 'live') return;
           if (!newReadings[unit.id]) newReadings[unit.id] = [];
           
           const base = unit.targetDecibel;
-          // Occasionally simulate high noise for testing alerts
           const isTestingAlert = Math.random() > 0.95;
           const noise = isTestingAlert 
             ? base + 15 + Math.random() * 10 
@@ -261,18 +305,15 @@ export default function App() {
           const unitReadings = [...newReadings[unit.id].slice(-100), newReading];
           newReadings[unit.id] = unitReadings;
 
-          // Alert Logic: Consistently exceeds target for a duration
-          // For demo purposes, let's say last 5 readings (approx 15 seconds) are all > target + 5
           if (settings.notifications && unitReadings.length >= 5) {
             const last5 = unitReadings.slice(-5);
             const allHigh = last5.every(r => r.decibels > unit.targetDecibel + 5);
             
             if (allHigh) {
-              // Check if we already have a recent alert for this unit to avoid spam
               const recentAlert = alerts.find(a => 
                 a.unitId === unit.id && 
                 a.type === 'threshold' && 
-                Date.now() - a.timestamp < 60000 // 1 minute cooldown
+                Date.now() - a.timestamp < 60000
               );
 
               if (!recentAlert) {
@@ -291,7 +332,13 @@ export default function App() {
         });
 
         if (newAlerts.length > 0) {
-          setAlerts(prevAlerts => [...newAlerts, ...prevAlerts].slice(0, 50));
+          for (const a of newAlerts) {
+            void apiFetch('/api/alerts', {
+              method: 'POST',
+              body: JSON.stringify(a),
+            });
+          }
+          setAlerts((prevAlerts) => [...newAlerts, ...prevAlerts].slice(0, 50));
         }
 
         return newReadings;
@@ -299,67 +346,172 @@ export default function App() {
     }, 3000);
 
     return () => clearInterval(interval);
-  }, [units, settings.notifications, alerts]);
+  }, [units, settings.notifications, alerts, currentUser]);
 
-  const handleAddUnit = (unitData: Omit<HospitalUnit, 'id' | 'createdAt'>) => {
+  // Live: poll stored readings from API for units marked Live (server Tuya poller only ingests Live units)
+  useEffect(() => {
+    if (!currentUser) return;
+
+    let cancelled = false;
+
+    const tick = async () => {
+      try {
+        const res = await apiFetch('/api/readings?limit=100');
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as {
+          byUnitId: Record<
+            string,
+            Array<{ id: string; unitId: string; timestamp: number; decibels: number }>
+          >;
+        };
+        if (cancelled) return;
+        setReadings((prev) => {
+          const next = { ...prev };
+          for (const unit of units) {
+            if (unitReadingSource(unit) !== 'live') continue;
+            const rows = data.byUnitId[unit.id] ?? [];
+            next[unit.id] = rows.map((r) => ({
+              id: r.id,
+              unitId: unit.id,
+              timestamp: r.timestamp,
+              decibels: Math.round(r.decibels),
+              isPeak: r.decibels > unit.targetDecibel + 15,
+            }));
+          }
+          return next;
+        });
+      } catch (e) {
+        console.error('[quietcare] /api/readings', e);
+      }
+    };
+
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [units, currentUser]);
+
+  // Live units: threshold alerts (same rule as demo; uses server-backed readings)
+  useEffect(() => {
+    if (!settings.notifications || !currentUser) return;
+
+    setAlerts((prevAlerts) => {
+      const newAlerts: Alert[] = [];
+      for (const unit of units) {
+        if (unitReadingSource(unit) !== 'live') continue;
+        const unitReadings = readings[unit.id] ?? [];
+        if (unitReadings.length < 5) continue;
+        const last5 = unitReadings.slice(-5);
+        const allHigh = last5.every((r) => r.decibels > unit.targetDecibel + 5);
+        if (!allHigh) continue;
+        const recentAlert = prevAlerts.find(
+          (a) =>
+            a.unitId === unit.id &&
+            a.type === 'threshold' &&
+            Date.now() - a.timestamp < 60000,
+        );
+        if (!recentAlert) {
+          newAlerts.push({
+            id: Math.random().toString(36).substr(2, 9),
+            unitId: unit.id,
+            timestamp: Date.now(),
+            type: 'threshold',
+            message: `High noise levels detected in ${unit.name} for over 5 minutes.`,
+            severity: 'high',
+            isRead: false,
+          });
+        }
+      }
+      if (newAlerts.length === 0) return prevAlerts;
+      for (const a of newAlerts) {
+        void apiFetch('/api/alerts', {
+          method: 'POST',
+          body: JSON.stringify(a),
+        });
+      }
+      return [...newAlerts, ...prevAlerts].slice(0, 50);
+    });
+  }, [readings, units, settings.notifications, currentUser]);
+
+  const handleAddUnit = async (unitData: Omit<HospitalUnit, 'id' | 'createdAt'>) => {
     if (editingUnit) {
-      setUnits(units.map(u => u.id === editingUnit.id ? { ...unitData, id: editingUnit.id, createdAt: editingUnit.createdAt } : u));
+      const r = await apiFetch(`/api/units/${encodeURIComponent(editingUnit.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(unitData),
+      });
+      if (r.ok) await refreshAppData();
       setEditingUnit(null);
     } else {
-      const newUnit: HospitalUnit = {
-        ...unitData,
-        id: Math.random().toString(36).substr(2, 9),
-        createdAt: Date.now()
-      };
-      setUnits([...units, newUnit]);
-      setSelectedUnitId(newUnit.id);
+      const r = await apiFetch('/api/units', {
+        method: 'POST',
+        body: JSON.stringify({ ...unitData, createdAt: Date.now() }),
+      });
+      if (r.ok) {
+        const created = (await r.json()) as HospitalUnit;
+        setSelectedUnitId(created.id);
+        await refreshAppData();
+      }
     }
   };
 
-  const handleDeleteUnit = (id: string) => {
+  const handleDeleteUnit = async (id: string) => {
     if (units.length <= 1) {
       alert("Cannot delete the last unit.");
       return;
     }
-    setUnits(units.filter(u => u.id !== id));
+    await apiFetch(`/api/units/${encodeURIComponent(id)}`, { method: 'DELETE' });
     if (selectedUnitId === id) {
-      setSelectedUnitId(units.find(u => u.id !== id)?.id || '');
+      setSelectedUnitId(units.find((u) => u.id !== id)?.id || '');
     }
+    await refreshAppData();
   };
 
-  const handleAddStaff = (staffData: Omit<StaffMember, 'id'>) => {
+  const handleAddStaff = async (staffData: Omit<StaffMember, 'id'>) => {
     if (editingStaff) {
-      setStaff(staff.map(s => s.id === editingStaff.id ? { ...staffData, id: editingStaff.id } : s));
+      const r = await apiFetch(`/api/staff/${encodeURIComponent(editingStaff.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(staffData),
+      });
+      if (r.ok) await refreshAppData();
       setEditingStaff(null);
     } else {
-      const newStaff: StaffMember = {
-        ...staffData,
-        id: Math.random().toString(36).substr(2, 9),
-      };
-      setStaff([...staff, newStaff]);
+      const r = await apiFetch('/api/staff', {
+        method: 'POST',
+        body: JSON.stringify(staffData),
+      });
+      if (r.ok) await refreshAppData();
     }
   };
 
-  const handleDeleteStaff = (id: string) => {
-    setStaff(staff.filter(s => s.id !== id));
+  const handleDeleteStaff = async (id: string) => {
+    await apiFetch(`/api/staff/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    await refreshAppData();
   };
 
-  const handleSaveMeeting = (meetingData: Omit<Meeting, 'id' | 'timestamp'>) => {
+  const handleSaveMeeting = async (meetingData: Omit<Meeting, 'id' | 'timestamp'>) => {
     if (editingMeeting) {
-      setMeetings(meetings.map(m => m.id === editingMeeting.id ? { ...meetingData, id: editingMeeting.id, timestamp: editingMeeting.timestamp } : m));
+      await apiFetch(`/api/meetings/${encodeURIComponent(editingMeeting.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          ...meetingData,
+          timestamp: editingMeeting.timestamp,
+        }),
+      });
       setEditingMeeting(null);
     } else {
-      const newMeeting: Meeting = {
-        ...meetingData,
-        id: Math.random().toString(36).substr(2, 9),
-        timestamp: Date.now(),
-      };
-      setMeetings([newMeeting, ...meetings]);
+      await apiFetch('/api/meetings', {
+        method: 'POST',
+        body: JSON.stringify({ ...meetingData, timestamp: Date.now() }),
+      });
     }
+    await refreshAppData();
   };
 
-  const handleDeleteMeeting = (id: string) => {
-    setMeetings(meetings.filter(m => m.id !== id));
+  const handleDeleteMeeting = async (id: string) => {
+    await apiFetch(`/api/meetings/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    await refreshAppData();
   };
 
   const handleGenerateReport = () => {
@@ -477,23 +629,26 @@ export default function App() {
     }, 1500);
   };
 
-  const handleAddFeedback = (fData: Omit<PatientFeedback, 'id' | 'timestamp' | 'unitId'>) => {
-    const newFeedback: PatientFeedback = {
-      ...fData,
-      id: Math.random().toString(36).substr(2, 9),
-      unitId: selectedUnitId,
-      timestamp: Date.now()
-    };
-    setFeedback(prev => ({
-      ...prev,
-      [selectedUnitId]: [newFeedback, ...(prev[selectedUnitId] || [])]
-    }));
+  const handleAddFeedback = async (fData: Omit<PatientFeedback, 'id' | 'timestamp' | 'unitId'>) => {
+    const r = await apiFetch('/api/feedback', {
+      method: 'POST',
+      body: JSON.stringify({ unitId: selectedUnitId, score: fData.score, comment: fData.comment }),
+    });
+    if (r.ok) {
+      const row = (await r.json()) as PatientFeedback;
+      setFeedback((prev) => ({
+        ...prev,
+        [selectedUnitId]: [row, ...(prev[selectedUnitId] || [])],
+      }));
+    }
   };
 
-  const currentReadings = readings[selectedUnitId] || [];
-  const currentFeedback = feedback[selectedUnitId] || [];
+  const selectedUnit = units.find((u) => u.id === selectedUnitId) || units[0];
+  const activeUnitId = selectedUnit?.id ?? selectedUnitId;
+  const currentReadings = readings[activeUnitId] || [];
+  const currentFeedback = feedback[activeUnitId] || [];
   const latestDb = currentReadings[currentReadings.length - 1]?.decibels || 0;
-  const isOverTarget = latestDb > selectedUnit.targetDecibel;
+  const isOverTarget = Boolean(selectedUnit && latestDb > selectedUnit.targetDecibel);
 
   const getAcousticStatus = (unitId: string, targetDb: number) => {
     const unitReadings = readings[unitId] || [];
@@ -514,7 +669,16 @@ export default function App() {
     }
   };
 
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <Loader2 className="w-10 h-10 text-blue-600 animate-spin" />
+      </div>
+    );
+  }
+
   if (activeTab === 'Feedback') {
+    const feedbackUnitName = selectedUnit?.name || publicFeedbackUnit?.name || 'this unit';
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
         <div className="w-full max-w-2xl space-y-8 animate-in fade-in slide-in-from-bottom-4">
@@ -524,24 +688,33 @@ export default function App() {
             </div>
             <div>
               <h2 className="text-3xl font-black text-slate-900 tracking-tight">Patient Feedback</h2>
-              <p className="text-slate-500 font-medium">Help us maintain a healing environment in {selectedUnit?.name}</p>
+              <p className="text-slate-500 font-medium">Help us maintain a healing environment in {feedbackUnitName}</p>
             </div>
           </div>
 
           <FeedbackForm 
             unitId={selectedUnitId} 
-            onSubmit={(data) => {
-              const newFeedback: PatientFeedback = {
-                ...data,
-                id: Math.random().toString(36).substr(2, 9),
-                unitId: selectedUnitId,
-                timestamp: Date.now()
-              };
-              setFeedback(prev => ({
-                ...prev,
-                [selectedUnitId]: [newFeedback, ...(prev[selectedUnitId] || [])]
-              }));
+            onSubmit={async (data) => {
+              const r = await apiFetchPublic('/api/feedback', {
+                method: 'POST',
+                body: JSON.stringify({
+                  unitId: selectedUnitId,
+                  score: data.score,
+                  comment: data.comment,
+                }),
+              });
+              if (!r.ok) {
+                alert('Could not submit feedback. Please try again.');
+                return;
+              }
               alert('Thank you for your feedback! We are committed to your comfort.');
+              if (currentUser) {
+                const row = (await r.json()) as PatientFeedback;
+                setFeedback((prev) => ({
+                  ...prev,
+                  [selectedUnitId]: [row, ...(prev[selectedUnitId] || [])],
+                }));
+              }
             }} 
           />
 
@@ -559,6 +732,24 @@ export default function App() {
             )}
           </div>
         </div>
+      </div>
+    );
+  }
+
+  if (currentUser && units.length === 0) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-4 p-8">
+        <p className="text-slate-700 font-medium text-center">No units in the database yet.</p>
+        <p className="text-sm text-slate-500 text-center max-w-md">
+          Use Settings → Import from localStorage (admin), or add units via the Units tab once data exists.
+        </p>
+        <button
+          type="button"
+          onClick={() => refreshAppData()}
+          className="px-4 py-2 bg-slate-900 text-white rounded-lg text-sm font-bold"
+        >
+          Retry
+        </button>
       </div>
     );
   }
@@ -1450,7 +1641,12 @@ export default function App() {
                     <p className="text-xs text-slate-500">Alert staff when noise exceeds target for {'>'}5 mins</p>
                   </div>
                   <button 
-                    onClick={() => setSettings(s => ({ ...s, notifications: !s.notifications }))}
+                    type="button"
+                    onClick={() => {
+                      const next = { ...settings, notifications: !settings.notifications };
+                      setSettings(next);
+                      void persistSettings(next);
+                    }}
                     className={cn(
                       "w-12 h-6 rounded-full relative transition-colors",
                       settings.notifications ? "bg-blue-600" : "bg-slate-200"
@@ -1469,7 +1665,11 @@ export default function App() {
                   </div>
                   <select 
                     value={settings.aiFrequency}
-                    onChange={(e) => setSettings(s => ({ ...s, aiFrequency: e.target.value }))}
+                    onChange={(e) => {
+                      const next = { ...settings, aiFrequency: e.target.value };
+                      setSettings(next);
+                      void persistSettings(next);
+                    }}
                     className="bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold p-2 outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     <option>Every 15 Minutes</option>
@@ -1484,7 +1684,11 @@ export default function App() {
                   </div>
                   <select 
                     value={settings.retention}
-                    onChange={(e) => setSettings(s => ({ ...s, retention: e.target.value }))}
+                    onChange={(e) => {
+                      const next = { ...settings, retention: e.target.value };
+                      setSettings(next);
+                      void persistSettings(next);
+                    }}
                     className="bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold p-2 outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     <option>30 Days</option>
@@ -1492,6 +1696,47 @@ export default function App() {
                     <option>1 Year</option>
                   </select>
                 </div>
+                {currentUser?.isAdmin && typeof localStorage !== 'undefined' && (
+                  <div className="p-6 space-y-3">
+                    <h4 className="font-bold text-slate-900">Import legacy browser data</h4>
+                    <p className="text-xs text-slate-500">
+                      One-time: copy units, staff, meetings, alerts, and settings from this browser&apos;s old localStorage into the server database.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          const raw = {
+                            units: JSON.parse(localStorage.getItem('quietcare_units') || 'null'),
+                            staff: JSON.parse(localStorage.getItem('quietcare_staff') || 'null'),
+                            meetings: JSON.parse(localStorage.getItem('quietcare_meetings') || 'null'),
+                            alerts: JSON.parse(localStorage.getItem('quietcare_alerts') || 'null'),
+                            settings: JSON.parse(localStorage.getItem('quietcare_settings') || 'null'),
+                          };
+                          if (!raw.units && !raw.staff) {
+                            alert('No legacy localStorage data found.');
+                            return;
+                          }
+                          const r = await apiFetch('/api/migrate', {
+                            method: 'POST',
+                            body: JSON.stringify(raw),
+                          });
+                          if (r.ok) {
+                            await refreshAppData();
+                            alert('Import complete.');
+                          } else {
+                            alert('Import failed.');
+                          }
+                        } catch {
+                          alert('Import failed.');
+                        }
+                      }}
+                      className="px-4 py-2 bg-amber-100 text-amber-900 rounded-lg text-xs font-bold"
+                    >
+                      Import from localStorage
+                    </button>
+                  </div>
+                )}
               </div>
               
               <div className="pt-8 flex flex-col items-end gap-4">
@@ -1501,7 +1746,9 @@ export default function App() {
                   </div>
                 )}
                 <button 
-                  onClick={() => {
+                  type="button"
+                  onClick={async () => {
+                    await persistSettings(settings);
                     setSaveStatus('Settings saved successfully!');
                     setTimeout(() => setSaveStatus(null), 3000);
                   }}
