@@ -640,6 +640,23 @@ export function getReadingsForUnit(unitId: string, limit: number): NoiseReadingR
   return rows.reverse();
 }
 
+export function getReadingsForUnitInTimeRange(
+  unitId: string,
+  fromMs: number,
+  toMs: number,
+  limit: number,
+): NoiseReadingRow[] {
+  return getDb()
+    .prepare(
+      `SELECT id, unit_id, timestamp_ms, decibels, raw_status_json, tuya_dedup_time
+       FROM noise_readings
+       WHERE unit_id = ? AND timestamp_ms >= ? AND timestamp_ms <= ?
+       ORDER BY timestamp_ms ASC
+       LIMIT ?`,
+    )
+    .all(unitId, fromMs, toMs, limit) as NoiseReadingRow[];
+}
+
 export function getReadingsForAllUnits(limitPerUnit: number): Record<string, NoiseReadingRow[]> {
   const units = getDb().prepare('SELECT id FROM units').all() as Array<{ id: string }>;
   const out: Record<string, NoiseReadingRow[]> = {};

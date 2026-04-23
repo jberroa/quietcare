@@ -20,6 +20,7 @@ import {
   getDb,
   getReadingsForAllUnits,
   getReadingsForUnit,
+  getReadingsForUnitInTimeRange,
   getSettings,
   getStaffById,
   insertAlert,
@@ -483,13 +484,28 @@ app.get('/api/readings', requireAuth, (req, res) => {
   try {
     getDb();
     const unitId = typeof req.query.unitId === 'string' ? req.query.unitId : undefined;
-    const limit = Math.min(Number(req.query.limit) || DEFAULT_LIMIT, 500);
+    const limit = Math.min(Number(req.query.limit) || DEFAULT_LIMIT, 10000);
+    const fromQ = req.query.from;
+    const toQ = req.query.to;
+    const fromMs = typeof fromQ === 'string' && fromQ !== '' ? Number(fromQ) : undefined;
+    const toMs = typeof toQ === 'string' && toQ !== '' ? Number(toQ) : undefined;
+    if (
+      unitId &&
+      fromMs != null &&
+      Number.isFinite(fromMs) &&
+      toMs != null &&
+      Number.isFinite(toMs)
+    ) {
+      const rows = getReadingsForUnitInTimeRange(unitId, fromMs, toMs, limit).map(rowToDto);
+      res.json({ byUnitId: { [unitId]: rows } });
+      return;
+    }
     if (unitId) {
       const rows = getReadingsForUnit(unitId, limit).map(rowToDto);
       res.json({ byUnitId: { [unitId]: rows } });
       return;
     }
-    const raw = getReadingsForAllUnits(limit);
+    const raw = getReadingsForAllUnits(Math.min(limit, 500));
     const byUnitId: Record<string, ReturnType<typeof rowToDto>[]> = {};
     for (const [uid, rows] of Object.entries(raw)) {
       byUnitId[uid] = rows.map(rowToDto);

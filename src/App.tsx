@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
   Activity, 
   Plus, 
@@ -31,7 +31,8 @@ import {
   BookOpen,
   Wind,
   Library,
-  CloudRain
+  CloudRain,
+  History,
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { HospitalUnit, NoiseReading, PatientFeedback, StaffMember, Meeting, Alert } from './types';
@@ -53,6 +54,11 @@ import { apiFetch, apiFetchPublic } from './lib/api';
 
 import { jsPDF } from 'jspdf';
 import { AnalyticsChart } from './components/AnalyticsChart';
+import {
+  DecibelHistoryPanel,
+  type DecibelHistoryRange,
+  getDecibelHistoryBounds,
+} from './components/DecibelHistoryPanel';
 import { LogOut, Lock, ShieldCheck } from 'lucide-react';
 
 export default function App() {
@@ -61,7 +67,18 @@ export default function App() {
   const [loginError, setLoginError] = useState('');
   const [authChecked, setAuthChecked] = useState(false);
 
-  const [activeTab, setActiveTab] = useState<'Dashboard' | 'Units' | 'Staff' | 'Committee' | 'Analytics' | 'Product' | 'Settings' | 'Education' | 'Feedback'>('Dashboard');
+  const [activeTab, setActiveTab] = useState<
+    | 'Dashboard'
+    | 'DecibelHistory'
+    | 'Units'
+    | 'Staff'
+    | 'Committee'
+    | 'Analytics'
+    | 'Product'
+    | 'Settings'
+    | 'Education'
+    | 'Feedback'
+  >('Dashboard');
   const [units, setUnits] = useState<HospitalUnit[]>([]);
   const [staff, setStaff] = useState<StaffMember[]>([]);
 
@@ -188,6 +205,8 @@ export default function App() {
   const [selectedUnitForQR, setSelectedUnitForQR] = useState<HospitalUnit | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [isAlertsOpen, setIsAlertsOpen] = useState(false);
+  const [unitAlertNotice, setUnitAlertNotice] = useState<string | null>(null);
+  const [acousticAlertActionLoading, setAcousticAlertActionLoading] = useState<'dispatch' | null>(null);
 
   // URL-based routing for feedback
   useEffect(() => {
@@ -268,6 +287,16 @@ export default function App() {
     }
   }, []);
 
+  const [decibelHistoryMode, setDecibelHistoryMode] = useState<'preset' | 'custom'>('preset');
+  const [decibelHistoryRange, setDecibelHistoryRange] = useState<DecibelHistoryRange>('24h');
+  const [decibelHistoryCustomFrom, setDecibelHistoryCustomFrom] = useState(
+    () => Date.now() - 24 * 60 * 60 * 1000,
+  );
+  const [decibelHistoryCustomTo, setDecibelHistoryCustomTo] = useState(() => Date.now());
+  const [decibelHistoryRows, setDecibelHistoryRows] = useState<NoiseReading[]>([]);
+  const [decibelHistoryLoading, setDecibelHistoryLoading] = useState(false);
+  const [decibelHistoryRefreshNonce, setDecibelHistoryRefreshNonce] = useState(0);
+
   // Analytics State
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [reportStatus, setReportStatus] = useState<string | null>(null);
@@ -278,11 +307,10 @@ export default function App() {
     if (!currentUser) return;
 
     const interval = setInterval(() => {
-      setReadings(prev => {
+      setReadings((prev) => {
         const newReadings = { ...prev };
-        const newAlerts: Alert[] = [];
 
-        units.forEach(unit => {
+        units.forEach((unit) => {
           if (unitReadingSource(unit) === 'live') return;
           if (!newReadings[unit.id]) newReadings[unit.id] = [];
           
@@ -305,48 +333,14 @@ export default function App() {
           const unitReadings = [...newReadings[unit.id].slice(-100), newReading];
           newReadings[unit.id] = unitReadings;
 
-          if (settings.notifications && unitReadings.length >= 5) {
-            const last5 = unitReadings.slice(-5);
-            const allHigh = last5.every(r => r.decibels > unit.targetDecibel + 5);
-            
-            if (allHigh) {
-              const recentAlert = alerts.find(a => 
-                a.unitId === unit.id && 
-                a.type === 'threshold' && 
-                Date.now() - a.timestamp < 60000
-              );
-
-              if (!recentAlert) {
-                newAlerts.push({
-                  id: Math.random().toString(36).substr(2, 9),
-                  unitId: unit.id,
-                  timestamp: Date.now(),
-                  type: 'threshold',
-                  message: `High noise levels detected in ${unit.name} for over 5 minutes.`,
-                  severity: 'high',
-                  isRead: false
-                });
-              }
-            }
-          }
         });
-
-        if (newAlerts.length > 0) {
-          for (const a of newAlerts) {
-            void apiFetch('/api/alerts', {
-              method: 'POST',
-              body: JSON.stringify(a),
-            });
-          }
-          setAlerts((prevAlerts) => [...newAlerts, ...prevAlerts].slice(0, 50));
-        }
 
         return newReadings;
       });
     }, 3000);
 
     return () => clearInterval(interval);
-  }, [units, settings.notifications, alerts, currentUser]);
+  }, [units, currentUser]);
 
   // Live: poll stored readings from API for units marked Live (server Tuya poller only ingests Live units)
   useEffect(() => {
@@ -393,36 +387,140 @@ export default function App() {
     };
   }, [units, currentUser]);
 
-  // Live units: threshold alerts (same rule as demo; uses server-backed readings)
+  const selectedUnitForHistory = units.find((u) => u.id === selectedUnitId) ?? units[0];
+
+  const decibelHistoryWindow = useMemo(
+    () =>
+      getDecibelHistoryBounds(
+        decibelHistoryMode,
+        decibelHistoryRange,
+        decibelHistoryCustomFrom,
+        decibelHistoryCustomTo,
+      ),
+    [
+      decibelHistoryMode,
+      decibelHistoryRange,
+      decibelHistoryCustomFrom,
+      decibelHistoryCustomTo,
+      decibelHistoryRefreshNonce,
+      readings,
+      activeTab,
+    ],
+  );
+
+  useEffect(() => {
+    if (activeTab !== 'DecibelHistory') {
+      setDecibelHistoryRows([]);
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab !== 'DecibelHistory' || !currentUser || !selectedUnitForHistory) {
+      return;
+    }
+    if (unitReadingSource(selectedUnitForHistory) !== 'live') return;
+
+    let cancelled = false;
+    (async () => {
+      setDecibelHistoryLoading(true);
+      try {
+        const { from, to } = getDecibelHistoryBounds(
+          decibelHistoryMode,
+          decibelHistoryRange,
+          decibelHistoryCustomFrom,
+          decibelHistoryCustomTo,
+        );
+        const res = await apiFetch(
+          `/api/readings?unitId=${encodeURIComponent(
+            selectedUnitForHistory.id,
+          )}&from=${from}&to=${to}&limit=10000`,
+        );
+        if (!res.ok || cancelled) {
+          if (!cancelled) setDecibelHistoryRows([]);
+          return;
+        }
+        const data = (await res.json()) as {
+          byUnitId: Record<string, Array<{ id: string; unitId: string; timestamp: number; decibels: number }>>;
+        };
+        if (cancelled) return;
+        const raw = data.byUnitId[selectedUnitForHistory.id] ?? [];
+        setDecibelHistoryRows(
+          raw.map((r) => ({
+            id: r.id,
+            unitId: r.unitId,
+            timestamp: r.timestamp,
+            decibels: Math.round(r.decibels),
+            isPeak: r.decibels > selectedUnitForHistory.targetDecibel + 15,
+          })),
+        );
+      } catch (e) {
+        console.error('[quietcare] decibel history', e);
+        if (!cancelled) setDecibelHistoryRows([]);
+      } finally {
+        if (!cancelled) setDecibelHistoryLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeTab,
+    currentUser,
+    selectedUnitForHistory,
+    decibelHistoryMode,
+    decibelHistoryRange,
+    decibelHistoryCustomFrom,
+    decibelHistoryCustomTo,
+    decibelHistoryRefreshNonce,
+  ]);
+
+  useEffect(() => {
+    if (activeTab !== 'DecibelHistory' || !selectedUnitForHistory) return;
+    if (unitReadingSource(selectedUnitForHistory) === 'live') return;
+    const { from, to } = getDecibelHistoryBounds(
+      decibelHistoryMode,
+      decibelHistoryRange,
+      decibelHistoryCustomFrom,
+      decibelHistoryCustomTo,
+    );
+    const all = readings[selectedUnitForHistory.id] ?? [];
+    setDecibelHistoryRows(all.filter((r) => r.timestamp >= from && r.timestamp <= to));
+  }, [
+    activeTab,
+    selectedUnitForHistory,
+    decibelHistoryMode,
+    decibelHistoryRange,
+    decibelHistoryCustomFrom,
+    decibelHistoryCustomTo,
+    readings,
+    decibelHistoryRefreshNonce,
+  ]);
+
+  // Demo + live: one unread threshold alert per unit until acknowledged (avoids a new copy every ~60s while noise stays high)
   useEffect(() => {
     if (!settings.notifications || !currentUser) return;
 
     setAlerts((prevAlerts) => {
       const newAlerts: Alert[] = [];
       for (const unit of units) {
-        if (unitReadingSource(unit) !== 'live') continue;
         const unitReadings = readings[unit.id] ?? [];
         if (unitReadings.length < 5) continue;
         const last5 = unitReadings.slice(-5);
         const allHigh = last5.every((r) => r.decibels > unit.targetDecibel + 5);
         if (!allHigh) continue;
-        const recentAlert = prevAlerts.find(
-          (a) =>
-            a.unitId === unit.id &&
-            a.type === 'threshold' &&
-            Date.now() - a.timestamp < 60000,
+        const hasOpenThreshold = prevAlerts.some(
+          (a) => a.unitId === unit.id && a.type === 'threshold' && !a.isRead,
         );
-        if (!recentAlert) {
-          newAlerts.push({
-            id: Math.random().toString(36).substr(2, 9),
-            unitId: unit.id,
-            timestamp: Date.now(),
-            type: 'threshold',
-            message: `High noise levels detected in ${unit.name} for over 5 minutes.`,
-            severity: 'high',
-            isRead: false,
-          });
-        }
+        if (hasOpenThreshold) continue;
+        newAlerts.push({
+          id: Math.random().toString(36).substr(2, 9),
+          unitId: unit.id,
+          timestamp: Date.now(),
+          type: 'threshold',
+          message: `High noise levels detected in ${unit.name} for over 5 minutes.`,
+          severity: 'high',
+          isRead: false,
+        });
       }
       if (newAlerts.length === 0) return prevAlerts;
       for (const a of newAlerts) {
@@ -650,6 +748,66 @@ export default function App() {
   const latestDb = currentReadings[currentReadings.length - 1]?.decibels || 0;
   const isOverTarget = Boolean(selectedUnit && latestDb > selectedUnit.targetDecibel);
 
+  const unreadThresholdAlertsForUnit = alerts.filter(
+    (a) => a.unitId === activeUnitId && !a.isRead && a.type === 'threshold',
+  );
+
+  const showUnitAlertNotice = (msg: string) => {
+    setUnitAlertNotice(msg);
+    window.setTimeout(() => setUnitAlertNotice(null), 5000);
+  };
+
+  const handleAcknowledgeAcousticAlerts = async () => {
+    if (unreadThresholdAlertsForUnit.length === 0) return;
+    const ids = new Set(unreadThresholdAlertsForUnit.map((a) => a.id));
+    setAlerts((prev) => prev.map((a) => (ids.has(a.id) ? { ...a, isRead: true } : a)));
+    try {
+      await Promise.all(
+        [...ids].map((id) =>
+          apiFetch(`/api/alerts/${encodeURIComponent(id)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ isRead: true }),
+          }),
+        ),
+      );
+      showUnitAlertNotice('Alerts acknowledged for this unit.');
+    } catch (e) {
+      console.error(e);
+      void refreshAppData();
+      showUnitAlertNotice('Could not sync acknowledge. Refreshed from server.');
+    }
+  };
+
+  const handleDispatchQuietTeam = async () => {
+    if (!selectedUnit || !currentUser) return;
+    setAcousticAlertActionLoading('dispatch');
+    try {
+      const dispatchAlert: Alert = {
+        id: Math.random().toString(36).slice(2, 11),
+        unitId: selectedUnit.id,
+        timestamp: Date.now(),
+        type: 'system',
+        message: `Quiet team dispatched to ${selectedUnit.name} by ${currentUser.name}.`,
+        severity: 'medium',
+        isRead: false,
+      };
+      const r = await apiFetch('/api/alerts', {
+        method: 'POST',
+        body: JSON.stringify(dispatchAlert),
+      });
+      if (r.ok) {
+        setAlerts((prev) => [dispatchAlert, ...prev].slice(0, 50));
+        showUnitAlertNotice('Quiet team dispatch recorded. Staff are notified in the alert feed.');
+      } else {
+        showUnitAlertNotice('Could not record dispatch. Please try again.');
+      }
+    } catch {
+      showUnitAlertNotice('Could not record dispatch. Please try again.');
+    } finally {
+      setAcousticAlertActionLoading(null);
+    }
+  };
+
   const getAcousticStatus = (unitId: string, targetDb: number) => {
     const unitReadings = readings[unitId] || [];
     const latestDb = unitReadings[unitReadings.length - 1]?.decibels || 0;
@@ -830,6 +988,12 @@ export default function App() {
             label="Dashboard" 
             active={activeTab === 'Dashboard'} 
             onClick={() => setActiveTab('Dashboard')}
+          />
+          <NavItem
+            icon={<History className="w-4 h-4" />}
+            label="Decibel history"
+            active={activeTab === 'DecibelHistory'}
+            onClick={() => setActiveTab('DecibelHistory')}
           />
           {currentUser.isAdmin && (
             <NavItem 
@@ -1162,21 +1326,109 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Alerts Section */}
-              <div className="bg-red-50 border border-red-100 rounded-2xl p-6 flex items-start gap-4">
-                <div className="p-3 bg-red-100 rounded-xl">
-                  <AlertTriangle className="w-6 h-6 text-red-600" />
-                </div>
-                <div className="flex-1">
-                  <h4 className="font-bold text-red-900 mb-1">Active Acoustic Alerts</h4>
-                  <p className="text-sm text-red-700 mb-4">Multiple noise spikes detected in ICU East during the last 15 minutes. Patient feedback indicates "loud staff conversations" near room 402.</p>
-                  <div className="flex items-center gap-3">
-                    <button className="px-4 py-2 bg-red-600 text-white text-xs font-bold uppercase tracking-widest rounded-lg hover:bg-red-700 transition-all">Dispatch Quiet Team</button>
-                    <button className="px-4 py-2 bg-white text-red-600 border border-red-200 text-xs font-bold uppercase tracking-widest rounded-lg hover:bg-red-50 transition-all">Acknowledge</button>
+              {/* Alerts Section — threshold alerts from live/demo noise rules */}
+              {unreadThresholdAlertsForUnit.length > 0 ? (
+                <div className="bg-red-50 border border-red-100 rounded-2xl p-6 flex items-start gap-4">
+                  <div className="p-3 bg-red-100 rounded-xl">
+                    <AlertTriangle className="w-6 h-6 text-red-600" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h4 className="font-bold text-red-900 mb-1">Active Acoustic Alerts</h4>
+                    <ul className="text-sm text-red-700 mb-4 space-y-2 list-disc list-inside">
+                      {unreadThresholdAlertsForUnit.map((a) => (
+                        <li key={a.id}>{a.message}</li>
+                      ))}
+                    </ul>
+                    {unitAlertNotice && (
+                      <p className="text-xs font-medium text-red-800 mb-3">{unitAlertNotice}</p>
+                    )}
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        disabled={acousticAlertActionLoading === 'dispatch'}
+                        onClick={() => void handleDispatchQuietTeam()}
+                        className="px-4 py-2 bg-red-600 text-white text-xs font-bold uppercase tracking-widest rounded-lg hover:bg-red-700 transition-all disabled:opacity-60 disabled:pointer-events-none"
+                      >
+                        {acousticAlertActionLoading === 'dispatch' ? 'Recording…' : 'Dispatch Quiet Team'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleAcknowledgeAcousticAlerts()}
+                        className="px-4 py-2 bg-white text-red-600 border border-red-200 text-xs font-bold uppercase tracking-widest rounded-lg hover:bg-red-50 transition-all"
+                      >
+                        Acknowledge
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
+              ) : (
+                <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-6 flex items-start gap-4">
+                  <div className="p-3 bg-emerald-100 rounded-xl">
+                    <CheckCircle2 className="w-6 h-6 text-emerald-600" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h4 className="font-bold text-emerald-900 mb-1">No active threshold alerts</h4>
+                    <p className="text-sm text-emerald-800 mb-4">
+                      {selectedUnit.name} has no unread high-noise alerts. You can still request a quiet team visit proactively.
+                    </p>
+                    {unitAlertNotice && (
+                      <p className="text-xs font-medium text-emerald-900 mb-3">{unitAlertNotice}</p>
+                    )}
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        disabled={acousticAlertActionLoading === 'dispatch'}
+                        onClick={() => void handleDispatchQuietTeam()}
+                        className="px-4 py-2 bg-emerald-700 text-white text-xs font-bold uppercase tracking-widest rounded-lg hover:bg-emerald-800 transition-all disabled:opacity-60 disabled:pointer-events-none"
+                      >
+                        {acousticAlertActionLoading === 'dispatch' ? 'Recording…' : 'Dispatch Quiet Team'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled
+                        title="No threshold alerts to acknowledge for this unit"
+                        className="px-4 py-2 bg-white text-emerald-600/50 border border-emerald-200 text-xs font-bold uppercase tracking-widest rounded-lg cursor-not-allowed"
+                      >
+                        Acknowledge
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </>
+          )}
+
+          {activeTab === 'DecibelHistory' && units.length > 0 && (
+            <DecibelHistoryPanel
+              units={units}
+              selectedUnitId={activeUnitId}
+              onSelectUnit={setSelectedUnitId}
+              timeMode={decibelHistoryMode}
+              onTimeModeChange={setDecibelHistoryMode}
+              range={decibelHistoryRange}
+              onRangeChange={(r) => {
+                setDecibelHistoryMode('preset');
+                setDecibelHistoryRange(r);
+              }}
+              customFrom={decibelHistoryCustomFrom}
+              customTo={decibelHistoryCustomTo}
+              onCustomFromChange={setDecibelHistoryCustomFrom}
+              onCustomToChange={setDecibelHistoryCustomTo}
+              from={decibelHistoryWindow.from}
+              to={decibelHistoryWindow.to}
+              rows={decibelHistoryRows}
+              loading={decibelHistoryLoading}
+              isLive={Boolean(selectedUnit && unitReadingSource(selectedUnit) === 'live')}
+              onRefresh={async () => {
+                setDecibelHistoryRefreshNonce((n) => n + 1);
+              }}
+            />
+          )}
+
+          {activeTab === 'DecibelHistory' && units.length === 0 && (
+            <div className="rounded-2xl border border-dashed border-slate-200 bg-white p-12 text-center text-slate-500">
+              <p className="font-medium">Add a unit to view decibel history.</p>
+            </div>
           )}
 
           {activeTab === 'Units' && (
