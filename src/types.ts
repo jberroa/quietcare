@@ -8,7 +8,7 @@ export interface HospitalUnit {
   targetDecibel: number;
   deviceName: string;
   deviceId: string;
-  /** Demo: simulated readings in the browser. Live: server polls Tuya and stores readings. */
+  /** Demo: simulated readings in the browser. Live: MQTT messages ingested by the API are stored and shown here. */
   readingSource?: 'demo' | 'live';
   createdAt: number;
 }

@@ -155,13 +155,13 @@ export const UnitModal: React.FC<UnitModalProps> = ({ isOpen, onClose, onSave, i
                   className="w-full px-4 py-3 bg-white border border-blue-100 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all text-sm font-bold"
                 >
                   <option value="demo">Demo (simulated in browser)</option>
-                  <option value="live">Live (server polls Tuya; needs real device id)</option>
+                  <option value="live">Live (MQTT → server; match sensor id below)</option>
                 </select>
               </div>
               <p className="text-[11px] text-blue-700/90 leading-relaxed">
-                For live mode, use the Tuya IoT cloud device id (same id used in{' '}
-                <code className="text-[10px] bg-blue-100/80 px-1 rounded">/v1.0/devices/&#123;device_id&#125;</code>
-                ). Friendly label below is for display only.
+                For live mode, set Sensor id to match your MQTT payload <code className="text-[10px] bg-blue-100/80 px-1 rounded">device_id</code>, the topic tail (e.g.{' '}
+                <code className="text-[10px] bg-blue-100/80 px-1 rounded">device_1</code>), or the full topic (e.g.{' '}
+                <code className="text-[10px] bg-blue-100/80 px-1 rounded">sound/device_1</code>). Device label is for display only.
               </p>
               <div className="grid grid-cols-2 gap-4">
                 <div>
@@ -176,11 +176,11 @@ export const UnitModal: React.FC<UnitModalProps> = ({ isOpen, onClose, onSave, i
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] font-bold uppercase tracking-widest text-blue-400 mb-1.5">Tuya device ID</label>
+                  <label className="block text-[10px] font-bold uppercase tracking-widest text-blue-400 mb-1.5">Sensor id</label>
                   <input
                     required
                     type="text"
-                    placeholder="eb79… (from Tuya IoT)"
+                    placeholder="device_1 or B4A6… (matches MQTT)"
                     className="w-full px-4 py-3 bg-white border border-blue-100 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all text-sm font-mono"
                     value={formData.deviceId}
                     onChange={(e) => setFormData({ ...formData, deviceId: e.target.value })}

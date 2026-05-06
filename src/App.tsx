@@ -342,7 +342,7 @@ export default function App() {
     return () => clearInterval(interval);
   }, [units, currentUser]);
 
-  // Live: poll stored readings from API for units marked Live (server Tuya poller only ingests Live units)
+  // Live: poll stored readings from API for units marked Live (MQTT ingest writes readings for live units)
   useEffect(() => {
     if (!currentUser) return;
 

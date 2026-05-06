@@ -9,8 +9,8 @@ export interface NoiseReadingRow {
   timestamp_ms: number;
   decibels: number;
   raw_status_json: string | null;
-  /** Unix seconds from Tuya device payload; used to skip duplicate snapshots. */
-  tuya_dedup_time?: number | null;
+  /** Stable key from ingest payload; skips duplicate MQTT snapshots per unit. */
+  ingest_dedup_time?: number | null;
 }
 
 let db: Database.Database | null = null;
@@ -38,15 +38,28 @@ function migrateUnitsAndReadings(database: Database.Database): void {
   if (!unitCols.some((c) => c.name === 'reading_source')) {
     database.exec(`ALTER TABLE units ADD COLUMN reading_source TEXT NOT NULL DEFAULT 'demo'`);
   }
+  if (!unitCols.some((c) => c.name === 'live_device_id')) {
+    if (unitCols.some((c) => c.name === 'tuya_device_id')) {
+      database.exec(`ALTER TABLE units RENAME COLUMN tuya_device_id TO live_device_id`);
+    } else {
+      database.exec(`ALTER TABLE units ADD COLUMN live_device_id TEXT NOT NULL DEFAULT ''`);
+    }
+  }
+
   const noiseCols = database
     .prepare('PRAGMA table_info(noise_readings)')
     .all() as Array<{ name: string }>;
-  if (!noiseCols.some((c) => c.name === 'tuya_dedup_time')) {
-    database.exec(`ALTER TABLE noise_readings ADD COLUMN tuya_dedup_time INTEGER`);
+  if (!noiseCols.some((c) => c.name === 'ingest_dedup_time')) {
+    if (noiseCols.some((c) => c.name === 'tuya_dedup_time')) {
+      database.exec(`DROP INDEX IF EXISTS idx_noise_unit_tuya_dedup`);
+      database.exec(`ALTER TABLE noise_readings RENAME COLUMN tuya_dedup_time TO ingest_dedup_time`);
+    } else {
+      database.exec(`ALTER TABLE noise_readings ADD COLUMN ingest_dedup_time INTEGER`);
+    }
   }
   database.exec(
-    `CREATE UNIQUE INDEX IF NOT EXISTS idx_noise_unit_tuya_dedup
-     ON noise_readings(unit_id, tuya_dedup_time) WHERE tuya_dedup_time IS NOT NULL`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_noise_unit_ingest_dedup
+     ON noise_readings(unit_id, ingest_dedup_time) WHERE ingest_dedup_time IS NOT NULL`,
   );
 }
 
@@ -61,7 +74,7 @@ function initSchema(database: Database.Database): void {
       department TEXT NOT NULL,
       target_decibel INTEGER NOT NULL,
       device_name TEXT NOT NULL,
-      tuya_device_id TEXT NOT NULL DEFAULT '',
+      live_device_id TEXT NOT NULL DEFAULT '',
       created_at INTEGER NOT NULL,
       reading_source TEXT NOT NULL DEFAULT 'demo'
     );
@@ -109,7 +122,7 @@ function initSchema(database: Database.Database): void {
       timestamp_ms INTEGER NOT NULL,
       decibels REAL NOT NULL,
       raw_status_json TEXT,
-      tuya_dedup_time INTEGER
+      ingest_dedup_time INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS patient_feedback (
@@ -144,13 +157,13 @@ function migrateLegacyMappings(database: Database.Database): void {
     if (!exists) {
       database
         .prepare(
-          `INSERT INTO units (id, name, type, location, floor, department, target_decibel, device_name, tuya_device_id, created_at, reading_source)
+          `INSERT INTO units (id, name, type, location, floor, department, target_decibel, device_name, live_device_id, created_at, reading_source)
            VALUES (?, 'Imported unit', 'Unknown', '', '', '', 45, '', ?, ?, 'live')`,
         )
         .run(m.unit_id, m.tuya_device_id, Date.now());
     } else {
       database
-        .prepare('UPDATE units SET tuya_device_id = ? WHERE id = ?')
+        .prepare('UPDATE units SET live_device_id = ? WHERE id = ?')
         .run(m.tuya_device_id, m.unit_id);
     }
   }
@@ -162,7 +175,7 @@ function seedIfEmpty(database: Database.Database): void {
   if (n.c > 0) return;
 
   const insUnit = database.prepare(
-    `INSERT INTO units (id, name, type, location, floor, department, target_decibel, device_name, tuya_device_id, created_at, reading_source)
+    `INSERT INTO units (id, name, type, location, floor, department, target_decibel, device_name, live_device_id, created_at, reading_source)
      VALUES (@id, @name, @type, @location, @floor, @department, @targetDecibel, @deviceName, @deviceId, @createdAt, @readingSource)`,
   );
   for (const u of SEED_UNITS) {
@@ -210,7 +223,7 @@ export function listUnits(): Array<Record<string, unknown>> {
   const rows = getDb()
     .prepare(
       `SELECT id, name, type, location, floor, department, target_decibel as targetDecibel,
-              device_name as deviceName, tuya_device_id as deviceId, created_at as createdAt,
+              device_name as deviceName, live_device_id as deviceId, created_at as createdAt,
               reading_source as readingSource
        FROM units ORDER BY name`,
     )
@@ -218,14 +231,43 @@ export function listUnits(): Array<Record<string, unknown>> {
   return rows as Array<Record<string, unknown>>;
 }
 
-export function listUnitsForPoll(): Array<{ id: string; tuya_device_id: string }> {
+/** Live units that should receive MQTT (or other) ingest. */
+export function listUnitsForLiveIngest(): Array<{ id: string; live_device_id: string }> {
   return getDb()
     .prepare(
-      `SELECT id, trim(tuya_device_id) as tuya_device_id
+      `SELECT id, trim(live_device_id) as live_device_id
        FROM units
-       WHERE trim(tuya_device_id) != '' AND reading_source = 'live'`,
+       WHERE trim(live_device_id) != '' AND reading_source = 'live'`,
     )
-    .all() as Array<{ id: string; tuya_device_id: string }>;
+    .all() as Array<{ id: string; live_device_id: string }>;
+}
+
+/**
+ * Resolve hospital unit id for an MQTT message: try payload device_id, then topic tail, then full topic.
+ */
+export function resolveLiveUnitForIngest(opts: {
+  payloadDeviceId?: string;
+  topic: string;
+}): string | null {
+  const topic = opts.topic.trim();
+  const tail = topic.includes('/') ? topic.slice(topic.lastIndexOf('/') + 1).trim() : topic;
+  const orderedKeys: string[] = [];
+  const seen = new Set<string>();
+  for (const k of [opts.payloadDeviceId?.trim() || '', tail, topic]) {
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    orderedKeys.push(k);
+  }
+  const database = getDb();
+  for (const key of orderedKeys) {
+    const row = database
+      .prepare(
+        `SELECT id FROM units WHERE reading_source = 'live' AND trim(live_device_id) = ? LIMIT 1`,
+      )
+      .get(key) as { id: string } | undefined;
+    if (row) return row.id;
+  }
+  return null;
 }
 
 export function insertUnit(row: {
@@ -244,7 +286,7 @@ export function insertUnit(row: {
   const readingSource = row.readingSource === 'live' ? 'live' : 'demo';
   getDb()
     .prepare(
-      `INSERT INTO units (id, name, type, location, floor, department, target_decibel, device_name, tuya_device_id, created_at, reading_source)
+      `INSERT INTO units (id, name, type, location, floor, department, target_decibel, device_name, live_device_id, created_at, reading_source)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
@@ -279,7 +321,7 @@ export function updateUnit(
   const readingSource = row.readingSource === 'live' ? 'live' : 'demo';
   getDb()
     .prepare(
-      `UPDATE units SET name=?, type=?, location=?, floor=?, department=?, target_decibel=?, device_name=?, tuya_device_id=?, reading_source=?
+      `UPDATE units SET name=?, type=?, location=?, floor=?, department=?, target_decibel=?, device_name=?, live_device_id=?, reading_source=?
        WHERE id=?`,
     )
     .run(
@@ -605,17 +647,17 @@ export function insertReading(
   row: Omit<NoiseReadingRow, 'raw_status_json'> & { raw_status_json?: string | null },
 ): void {
   const database = getDb();
-  const dedup = row.tuya_dedup_time;
+  const dedup = row.ingest_dedup_time;
   if (dedup != null) {
     const exists = database
-      .prepare('SELECT 1 FROM noise_readings WHERE unit_id = ? AND tuya_dedup_time = ?')
+      .prepare('SELECT 1 FROM noise_readings WHERE unit_id = ? AND ingest_dedup_time = ?')
       .get(row.unit_id, dedup);
     if (exists) return;
   }
   database
     .prepare(
-      `INSERT INTO noise_readings (id, unit_id, timestamp_ms, decibels, raw_status_json, tuya_dedup_time)
-       VALUES (@id, @unit_id, @timestamp_ms, @decibels, @raw_status_json, @tuya_dedup_time)`,
+      `INSERT INTO noise_readings (id, unit_id, timestamp_ms, decibels, raw_status_json, ingest_dedup_time)
+       VALUES (@id, @unit_id, @timestamp_ms, @decibels, @raw_status_json, @ingest_dedup_time)`,
     )
     .run({
       id: row.id,
@@ -623,14 +665,14 @@ export function insertReading(
       timestamp_ms: row.timestamp_ms,
       decibels: row.decibels,
       raw_status_json: row.raw_status_json ?? null,
-      tuya_dedup_time: dedup ?? null,
+      ingest_dedup_time: dedup ?? null,
     });
 }
 
 export function getReadingsForUnit(unitId: string, limit: number): NoiseReadingRow[] {
   const rows = getDb()
     .prepare(
-      `SELECT id, unit_id, timestamp_ms, decibels, raw_status_json, tuya_dedup_time
+      `SELECT id, unit_id, timestamp_ms, decibels, raw_status_json, ingest_dedup_time
        FROM noise_readings
        WHERE unit_id = ?
        ORDER BY timestamp_ms DESC
@@ -648,7 +690,7 @@ export function getReadingsForUnitInTimeRange(
 ): NoiseReadingRow[] {
   return getDb()
     .prepare(
-      `SELECT id, unit_id, timestamp_ms, decibels, raw_status_json, tuya_dedup_time
+      `SELECT id, unit_id, timestamp_ms, decibels, raw_status_json, ingest_dedup_time
        FROM noise_readings
        WHERE unit_id = ? AND timestamp_ms >= ? AND timestamp_ms <= ?
        ORDER BY timestamp_ms ASC
@@ -680,7 +722,7 @@ export function migrateFromBrowserPayload(body: {
     if (Array.isArray(body.units) && body.units.length > 0) {
       database.prepare('DELETE FROM units').run();
       const ins = database.prepare(
-        `INSERT INTO units (id, name, type, location, floor, department, target_decibel, device_name, tuya_device_id, created_at, reading_source)
+        `INSERT INTO units (id, name, type, location, floor, department, target_decibel, device_name, live_device_id, created_at, reading_source)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const u of body.units as Array<Record<string, unknown>>) {

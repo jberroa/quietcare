@@ -1,11 +1,10 @@
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import express from 'express';
 import session from 'express-session';
 import { randomUUID } from 'crypto';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Resolved api/.env next to package.json */
@@ -26,7 +25,6 @@ import {
   insertAlert,
   insertFeedback,
   insertMeeting,
-  insertReading,
   insertStaff,
   insertUnit,
   listAlerts,
@@ -34,7 +32,7 @@ import {
   listMeetings,
   listStaff,
   listUnits,
-  listUnitsForPoll,
+  listUnitsForLiveIngest,
   migrateFromBrowserPayload,
   NoiseReadingRow,
   setSettings,
@@ -43,12 +41,7 @@ import {
   updateStaff,
   updateUnit,
 } from './db.js';
-import {
-  extractDecibelFromStatus,
-  extractTuyaDedupTime,
-  fetchDeviceStatusRaw,
-  getTuyaContext,
-} from './tuya.js';
+import { getMqttIngestState, startMqttIngest } from './mqtt-ingest.js';
 
 declare module 'express-session' {
   interface SessionData {
@@ -58,7 +51,6 @@ declare module 'express-session' {
 
 const app = express();
 const DEFAULT_LIMIT = 100;
-const pollIntervalMs = Number(process.env.TUYA_POLL_INTERVAL_MS) || 30_000;
 
 // TLS often terminates at Coolify/nginx; Node sees HTTP. Trust X-Forwarded-Proto so
 // req.secure is true and express-session can send Secure + SameSite=None cookies.
@@ -126,25 +118,16 @@ function rowToDto(r: NoiseReadingRow) {
   };
 }
 
-function getStatusMode(): 'legacy' | 'iot03' {
-  const m = (process.env.TUYA_DEVICE_STATUS_MODE || 'legacy').toLowerCase();
-  return m === 'iot03' ? 'iot03' : 'legacy';
-}
-
-function getDpCode(): string {
-  return (process.env.TUYA_DECIBEL_DP_CODE || 'co2_value').trim();
-}
-
-function getScale(): number {
-  const s = Number(process.env.TUYA_DECIBEL_SCALE ?? '1');
-  return Number.isFinite(s) && s > 0 ? s : 1;
-}
-
 app.get('/api/health', (_req, res) => {
+  const mqttConfigured = Boolean(process.env.MQTT_URL?.trim());
+  const mq = getMqttIngestState();
   res.json({
     ok: true,
-    tuyaConfigured: Boolean(getTuyaContext()),
-    pollIntervalMs,
+    mqtt: {
+      configured: mqttConfigured,
+      connected: mq.connected,
+      lastMessageAt: mq.lastMessageAt,
+    },
   });
 });
 
@@ -517,80 +500,30 @@ app.get('/api/readings', requireAuth, (req, res) => {
   }
 });
 
-let pollTimer: ReturnType<typeof setInterval> | null = null;
-
-async function pollOnce(): Promise<void> {
-  const dpCode = getDpCode();
-  if (!dpCode) return;
-  if (!getTuyaContext()) return;
-  const mode = getStatusMode();
-  const scale = getScale();
-  const mappings = listUnitsForPoll();
-  const ts = Date.now();
-
-  for (const row of mappings) {
-    try {
-      const raw = await fetchDeviceStatusRaw(row.tuya_device_id, mode);
-      const payload = raw as { success?: boolean; msg?: string };
-      if (payload && typeof payload === 'object' && payload.success === false) {
-        console.warn(`[tuya] device ${row.tuya_device_id}:`, payload.msg || 'request failed');
-        continue;
-      }
-      const dB = extractDecibelFromStatus(raw, dpCode, scale);
-      if (dB == null) {
-        console.warn(`[tuya] no DP "${dpCode}" in status for device ${row.tuya_device_id}`);
-        continue;
-      }
-      const dedup = extractTuyaDedupTime(raw);
-      insertReading({
-        id: randomUUID(),
-        unit_id: row.id,
-        timestamp_ms: ts,
-        decibels: dB,
-        raw_status_json: JSON.stringify(raw),
-        tuya_dedup_time: dedup ?? undefined,
-      });
-    } catch (err) {
-      console.error(`[tuya] poll error for ${row.tuya_device_id}:`, err);
-    }
-  }
-}
-
-function startPollLoop(): void {
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(() => {
-    pollOnce().catch((e) => console.error('[tuya] pollOnce', e));
-  }, pollIntervalMs);
-  pollOnce().catch((e) => console.error('[tuya] initial poll', e));
-}
-
 const apiPort = Number(process.env.API_PORT || process.env.PORT) || 3001;
 
 app.listen(apiPort, () => {
   getDb();
   console.log(`[api] listening on ${apiPort}`);
-  const tuyaOk = Boolean(getTuyaContext());
-  console.log(
-    `[api] Tuya: ${tuyaOk ? 'configured' : 'not configured — set TUYA_ACCESS_KEY and TUYA_SECRET_KEY in api/.env (restart after saving)'}`,
-  );
-  if (!tuyaOk) {
-    try {
-      const st = fs.statSync(ENV_FILE_PATH);
-      if (st.size === 0) {
-        console.warn(
-          `[api] ${ENV_FILE_PATH} is empty (0 bytes). Paste your keys as: TUYA_ACCESS_KEY=... and TUYA_SECRET_KEY=... (one per line, no quotes).`,
-        );
-      }
-    } catch {
-      console.warn(`[api] Missing ${ENV_FILE_PATH} — run: cp .env.example .env then add your Tuya Access ID/Secret.`);
+
+  const mqttConfigured = Boolean(process.env.MQTT_URL?.trim());
+  if (mqttConfigured) {
+    startMqttIngest();
+  } else {
+    console.warn(
+      `[api] MQTT_URL not set — live units will not receive readings. Set MQTT broker URL in ${ENV_FILE_PATH}`,
+    );
+  }
+
+  const liveTargets = listUnitsForLiveIngest();
+  if (liveTargets.length > 0) {
+    console.log(
+      `[api] ${liveTargets.length} live unit(s) (ids: ${liveTargets.map((p) => p.id).join(', ')})`,
+    );
+    if (!mqttConfigured) {
+      console.warn(
+        '[api] Live units exist but MQTT is off; /api/readings will stay empty for those until MQTT_URL is set.',
+      );
     }
   }
-  const pollTargets = listUnitsForPoll();
-  if (pollTargets.length > 0) {
-    console.log(`[api] ${pollTargets.length} live unit(s) will be polled (ids: ${pollTargets.map((p) => p.id).join(', ')})`);
-    if (!tuyaOk) {
-      console.warn('[api] Live units exist but Tuya is off; /api/readings will stay empty until keys are valid.');
-    }
-  }
-  startPollLoop();
 });
