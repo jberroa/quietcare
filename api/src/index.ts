@@ -20,6 +20,7 @@ import {
   getReadingsForAllUnits,
   getReadingsForUnit,
   getReadingsForUnitInTimeRange,
+  getReadingsHourlyRollupForUnit,
   getSettings,
   getStaffById,
   insertAlert,
@@ -460,6 +461,32 @@ app.post('/api/migrate', requireAdmin, (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'migrate_failed' });
+  }
+});
+
+app.get('/api/readings/hourly-summary', requireAuth, (req, res) => {
+  try {
+    getDb();
+    const unitId = typeof req.query.unitId === 'string' ? req.query.unitId : undefined;
+    const fromQ = req.query.from;
+    const toQ = req.query.to;
+    const fromMs = typeof fromQ === 'string' && fromQ !== '' ? Number(fromQ) : NaN;
+    const toMs = typeof toQ === 'string' && toQ !== '' ? Number(toQ) : NaN;
+    if (!unitId || !Number.isFinite(fromMs) || !Number.isFinite(toMs)) {
+      res.status(400).json({ error: 'unitId, from, and to query params required (epoch ms)' });
+      return;
+    }
+    const rows = getReadingsHourlyRollupForUnit(unitId, fromMs, toMs);
+    res.json({
+      unitId,
+      fromMs,
+      toMs,
+      bucketDurationMs: 3_600_000,
+      rows,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'hourly_summary_failed' });
   }
 });
 

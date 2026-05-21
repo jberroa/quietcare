@@ -699,6 +699,50 @@ export function getReadingsForUnitInTimeRange(
     .all(unitId, fromMs, toMs, limit) as NoiseReadingRow[];
 }
 
+/** Hourly buckets aligned to UNIX epoch multiples of one hour (UTC). */
+export interface HourlyDecibelRollupRow {
+  bucketStartMs: number;
+  sampleCount: number;
+  minDb: number;
+  maxDb: number;
+  avgDb: number;
+}
+
+export function getReadingsHourlyRollupForUnit(
+  unitId: string,
+  fromMs: number,
+  toMs: number,
+): HourlyDecibelRollupRow[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT
+         (CAST(timestamp_ms AS INTEGER) / 3600000) * 3600000 AS bucketStartMs,
+         COUNT(*) AS sampleCount,
+         MIN(decibels) AS minDb,
+         MAX(decibels) AS maxDb,
+         AVG(decibels) AS avgDb
+       FROM noise_readings
+       WHERE unit_id = ? AND timestamp_ms >= ? AND timestamp_ms <= ?
+       GROUP BY CAST(timestamp_ms AS INTEGER) / 3600000
+       ORDER BY bucketStartMs ASC`,
+    )
+    .all(unitId, fromMs, toMs) as Array<{
+    bucketStartMs: number;
+    sampleCount: number;
+    minDb: number;
+    maxDb: number;
+    avgDb: number;
+  }>;
+
+  return rows.map((r) => ({
+    bucketStartMs: Number(r.bucketStartMs),
+    sampleCount: Number(r.sampleCount),
+    minDb: Math.round(Number(r.minDb)),
+    maxDb: Math.round(Number(r.maxDb)),
+    avgDb: Number(r.avgDb),
+  }));
+}
+
 export function getReadingsForAllUnits(limitPerUnit: number): Record<string, NoiseReadingRow[]> {
   const units = getDb().prepare('SELECT id FROM units').all() as Array<{ id: string }>;
   const out: Record<string, NoiseReadingRow[]> = {};

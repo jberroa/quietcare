@@ -1,10 +1,11 @@
-import React, { useCallback, useMemo } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { format } from 'date-fns';
 import { Download, FileText, History, RefreshCw, Loader2, CalendarRange } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { NoiseChart } from './NoiseChart';
 import { NoiseReading, HospitalUnit } from '../types';
 import { cn } from '../lib/utils';
+import { apiFetch } from '../lib/api';
 
 export type DecibelHistoryRange = '1h' | '6h' | '24h' | '7d' | '30d';
 
@@ -67,6 +68,49 @@ function buildCsvRows(rows: NoiseReading[], unitName: string): string {
   return [header, ...lines].join('\n');
 }
 
+/** Matches `/api/readings/hourly-summary` row shape — UTC-aligned epoch-hour buckets (ms). */
+export type HourlyDecibelSummaryRow = {
+  bucketStartMs: number;
+  sampleCount: number;
+  minDb: number;
+  maxDb: number;
+  avgDb: number;
+};
+
+function hourlyRollupFromSamples(readings: NoiseReading[]): HourlyDecibelSummaryRow[] {
+  const buckets = new Map<number, number[]>();
+  for (const r of readings) {
+    const bucket = Math.floor(r.timestamp / 3600000) * 3600000;
+    const arr = buckets.get(bucket) ?? [];
+    arr.push(r.decibels);
+    buckets.set(bucket, arr);
+  }
+  return [...buckets.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([bucketStartMs, vals]) => {
+      const minDb = Math.min(...vals);
+      const maxDb = Math.max(...vals);
+      const avgDb = vals.reduce((acc, x) => acc + x, 0) / vals.length;
+      return {
+        bucketStartMs,
+        sampleCount: vals.length,
+        minDb,
+        maxDb,
+        avgDb,
+      };
+    });
+}
+
+function buildHourlySummaryCsv(summaryRows: HourlyDecibelSummaryRow[], unitName: string): string {
+  const header = 'bucket_start_utc_iso,bucket_start_local,unit_name,min_db,max_db,avg_db,sample_count';
+  const uf = unitName.replace(/"/g, '""');
+  const lines = summaryRows.map((r) => {
+    const d = new Date(r.bucketStartMs);
+    return `${d.toISOString()},${format(d, 'yyyy-MM-dd HH:mm:ss')},${uf},${Math.round(r.minDb)},${Math.round(r.maxDb)},${Number(r.avgDb).toFixed(2)},${r.sampleCount}`;
+  });
+  return [header, ...lines].join('\n');
+}
+
 function downloadTextFile(filename: string, content: string, mime: string) {
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -116,6 +160,8 @@ export function DecibelHistoryPanel(props: {
     onRefresh,
   } = props;
 
+  const [summaryExportBusy, setSummaryExportBusy] = useState(false);
+
   const unit = units.find((u) => u.id === selectedUnitId) ?? units[0];
   const rangeSummary = useMemo(() => {
     if (timeMode === 'custom') {
@@ -145,6 +191,39 @@ export function DecibelHistoryPanel(props: {
       'text/csv;charset=utf-8',
     );
   }, [unit, rows]);
+
+  const downloadSummaryCsv = useCallback(async () => {
+    if (!unit) return;
+    setSummaryExportBusy(true);
+    try {
+      let summaryRows: HourlyDecibelSummaryRow[];
+      if (isLive) {
+        const res = await apiFetch(
+          `/api/readings/hourly-summary?unitId=${encodeURIComponent(unit.id)}&from=${from}&to=${to}`,
+        );
+        if (!res.ok) {
+          console.error('[quietcare] hourly-summary HTTP', res.status);
+          return;
+        }
+        const data = (await res.json()) as { rows?: HourlyDecibelSummaryRow[] };
+        summaryRows = Array.isArray(data.rows) ? data.rows : [];
+      } else {
+        summaryRows = hourlyRollupFromSamples(rows);
+      }
+
+      const csv = buildHourlySummaryCsv(summaryRows, unit.name);
+      const safe = unit.name.replace(/[^\w\-]+/g, '_').slice(0, 40);
+      downloadTextFile(
+        `decibel_hourly_summary_${safe}_${format(new Date(), 'yyyy-MM-dd_HHmm')}.csv`,
+        csv,
+        'text/csv;charset=utf-8',
+      );
+    } catch (e) {
+      console.error('[quietcare] summary CSV export', e);
+    } finally {
+      setSummaryExportBusy(false);
+    }
+  }, [unit, isLive, from, to, rows]);
 
   const downloadPdf = useCallback(() => {
     if (!unit) return;
@@ -205,7 +284,11 @@ export function DecibelHistoryPanel(props: {
       y += 6;
       doc.setFontSize(8);
       doc.setTextColor(100, 116, 139);
-      doc.text(`… and ${rows.length - maxRows} more rows (export CSV for full data).`, margin, y);
+      doc.text(
+        `… and ${rows.length - maxRows} more rows (use Raw CSV for samples; Summary CSV for hourly rollups).`,
+        margin,
+        y,
+      );
     }
 
     const safe = unit.name.replace(/[^\w\-]+/g, '_').slice(0, 40);
@@ -223,7 +306,8 @@ export function DecibelHistoryPanel(props: {
             <h2 className="text-3xl font-black text-slate-900 tracking-tight">Decibel history</h2>
           </div>
           <p className="text-slate-500 font-medium">
-            Review stored readings for the selected range. Export to CSV or PDF for reports.
+            Review stored readings for the selected window. Summary CSV downloads hourly min / max / average for the{' '}
+            <span className="text-slate-700">whole</span> range (live units: server aggregates). UTC-aligned hourly buckets.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -238,12 +322,21 @@ export function DecibelHistoryPanel(props: {
           </button>
           <button
             type="button"
+            onClick={() => void downloadSummaryCsv()}
+            disabled={summaryExportBusy || !unit || (!isLive && rows.length === 0)}
+            className="px-4 py-2.5 bg-emerald-700 text-white rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-emerald-600 flex items-center gap-2 disabled:opacity-40 disabled:pointer-events-none"
+          >
+            {summaryExportBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+            Summary CSV
+          </button>
+          <button
+            type="button"
             onClick={downloadCsv}
             disabled={rows.length === 0}
             className="px-4 py-2.5 bg-slate-900 text-white rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-slate-800 flex items-center gap-2 disabled:opacity-40 disabled:pointer-events-none"
           >
             <Download className="w-4 h-4" />
-            CSV
+            Raw CSV
           </button>
           <button
             type="button"
