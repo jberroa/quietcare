@@ -648,15 +648,9 @@ export function insertReading(
 ): void {
   const database = getDb();
   const dedup = row.ingest_dedup_time;
-  if (dedup != null) {
-    const exists = database
-      .prepare('SELECT 1 FROM noise_readings WHERE unit_id = ? AND ingest_dedup_time = ?')
-      .get(row.unit_id, dedup);
-    if (exists) return;
-  }
   database
     .prepare(
-      `INSERT INTO noise_readings (id, unit_id, timestamp_ms, decibels, raw_status_json, ingest_dedup_time)
+      `INSERT OR IGNORE INTO noise_readings (id, unit_id, timestamp_ms, decibels, raw_status_json, ingest_dedup_time)
        VALUES (@id, @unit_id, @timestamp_ms, @decibels, @raw_status_json, @ingest_dedup_time)`,
     )
     .run({
